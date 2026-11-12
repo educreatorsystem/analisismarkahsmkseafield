@@ -23,6 +23,12 @@ Gunakan deployment Apps Script sedia ada pada URL baharu yang diberikan. Tiada f
 
 Sistem memerlukan capaian internet untuk membaca Google Sheet, menghantar markah serta memuatkan gaya dan fon luaran.
 
+## Analisis rekod markah daripada Google Sheet
+
+Sistem mengambil rekod markah daripada CSV setiap kali pengguna log masuk. Apabila terdapat markah, paparan guru dibuka pada **Analisis Individu** dengan kelas dan pentaksiran yang mempunyai rekod. Tab **Prestasi MP**, **Kedudukan Murid** dan **Pelaporan (Slip)** menggunakan rekod yang sama. Log keluar dan log masuk semula untuk memuatkan perubahan pada Google Sheet.
+
+Lajur **Kelas** dan **Tingkatan** digunakan bersama. Contohnya `EDISON` dengan tingkatan `5` dipadankan kepada `5 EDISON`. Rekod bagi murid, pentaksiran dan subjek yang sama dikira sekali. Jika cap masa boleh dibaca, rekod terbaharu digunakan. Jika cap masa tidak dapat dibandingkan, baris terakhir yang sepadan digunakan.
+
 ## Slip peperiksaan
 
 Slip menggunakan jadual Bil., Mata Pelajaran, Markah dan Gred. Ringkasan selepas jadual memaparkan bilangan subjek, pecahan gred, gred purata, jumlah markah, keputusan dan peratus. Dalam cetakan A4, setiap murid bermula pada muka surat baharu.

@@ -680,6 +680,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 
         <!-- Main Content -->
         <main class="flex-1 overflow-y-auto bg-slate-50 relative" id="mainScrollArea">
+                <p id="dataNotice" role="status" class="no-print mx-4 mt-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-800" hidden></p>
             
             <div id="content-input" class="tab-content hidden p-4 sm:p-6 lg:p-8 no-print">
                 <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 mb-6">
@@ -888,7 +889,6 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
                 <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5 mb-6">
                     <h2 id="slipHeading" class="text-xl font-bold text-slate-800 mb-4 flex items-center gap-2">Pelaporan Individu</h2>
                     <p id="parentStudentInfo" class="text-sm text-slate-600 mb-4" hidden></p>
-                    <p id="dataNotice" class="text-sm text-amber-800 bg-amber-50 p-3 rounded-lg mb-4" hidden></p>
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div id="slipClassField">
                             <label class="block text-sm font-medium text-slate-700 mb-1">Kelas</label>
@@ -1060,7 +1060,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
                     assessments.forEach(a => options.add(new Option(a, a)));
                     if (ownAssessments.length) options.value = ownAssessments[0];
                 }
-                switchTab(child ? 'pelaporan' : 'input');
+                switchTab(child ? 'pelaporan' : (MOCK_DB.marks.length ? 'analisis-ind' : 'input'));
             } catch (error) {
                 authSession = null;
                 clearLoadedData();
@@ -1112,7 +1112,6 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
                 // --- 1. PROSES JADUAL MURID & KELAS ---
                 const dataMurid = parseCSV(csvMurid);
                 MOCK_DB.students = [];
-                let classSet = new Set();
 
                 dataMurid.forEach((row, index) => {
                     const keyKelas = findHeader(row, ['KELAS', 'CLASS']);
@@ -1123,22 +1122,21 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
                         const nama = String(row[keyNama] || '').trim();
 
                         if(nama !== '' && kelas !== '') {
-                            classSet.add(kelas);
                             MOCK_DB.students.push({
                                 id: index + 1,
                                 name: nama,
+                                sheetStudentId: readCSVField(row, ['ID MURID']),
                                 delimaEmail: normalizeDelimaEmail(row[findHeader(row, DELIMA_HEADERS)]),
                                 icNumber: readCSVField(row, ['NO KAD PENGENALAN', 'NO. KAD PENGENALAN', 'NO KP', 'NO. KP', 'NO K/P', 'NO IC']),
                                 gender: readCSVField(row, ['JANTINA', 'GENDER']),
                                 classTeacher: readCSVField(row, ['NAMA GURU KELAS', 'GURU KELAS']),
                                 teacherComment: readCSVField(row, ['ULASAN GURU KELAS']),
                                 class: kelas,
-                                form: parseInt(kelas.charAt(0)) || 1
+                                form: readFormNumber(kelas) || 1
                             });
                         }
                     }
                 });
-                MOCK_DB.classes = Array.from(classSet).sort(naturalSort);
 
                 // --- 2. PROSES JADUAL PENTAKSIRAN & SUBJEK ---
                 const dataSubjek = parseCSV(csvSubjek);
@@ -1160,40 +1158,82 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
                 MOCK_DB.assessments = Array.from(pentaksiranSet);
                 MOCK_DB.subjects = Array.from(subjekSet).sort(naturalSort);
 
-                // --- 3. PROSES REKOD MARKAH MURID ---
-                MOCK_DB.marks = [];
-                if (csvMarkah && csvMarkah.trim() !== '') {
-                    const dataMarkah = parseCSV(csvMarkah);
+                // Rekod markah menentukan pilihan analisis. Senarai murid membekalkan
+                // maklumat tambahan dan padanan untuk log masuk ibu bapa.
+                const assessmentsByKey = new Map(MOCK_DB.assessments.map(name => [normalizeText(name), name]));
+                const subjectsByKey = new Map(MOCK_DB.subjects.map(name => [normalizeText(name), name]));
+                const studentsByClassAndName = new Map();
+                for (const student of MOCK_DB.students) {
+                    const key = JSON.stringify([normalizeText(student.name), normalizeClassName(student.class)]);
+                    const candidates = studentsByClassAndName.get(key) || [];
+                    candidates.push(student);
+                    studentsByClassAndName.set(key, candidates);
+                }
 
-                    dataMarkah.forEach(row => {
-                        const keyNama = findHeader(row, ['NAMA MURID', 'NAMA', 'NAMA PELAJAR']);
-                        const keyKelas = findHeader(row, ['KELAS', 'CLASS']);
-                        const keyPentaksiran = findHeader(row, ['PENTAKSIRAN', 'UJIAN', 'PEPERIKSAAN']);
-                        const keySubjek = findHeader(row, ['SUBJEK', 'MATA PELAJARAN', 'MATAPELAJARAN', 'MP']);
-                        const keyMarkah = findHeader(row, ['MARKAH', 'SKOR', 'MARK']);
+                const marksByStudentSubject = new Map();
+                let nextStudentId = dataMurid.length + 1;
+                let skippedRecords = 0;
+                for (const row of parseCSV(csvMarkah)) {
+                    const name = readCSVField(row, ['NAMA MURID', 'NAMA', 'NAMA PELAJAR']);
+                    const sourceClass = readCSVField(row, ['KELAS', 'CLASS']);
+                    const sourceAssessment = readCSVField(row, ['PENTAKSIRAN', 'UJIAN', 'PEPERIKSAAN']);
+                    const sourceSubject = readCSVField(row, ['SUBJEK', 'MATA PELAJARAN', 'MATAPELAJARAN', 'MP']);
+                    const sheetStudentId = readCSVField(row, ['ID MURID']);
+                    const formField = readCSVField(row, ['TINGKATAN', 'FORM']);
+                    const className = normalizeClassName(sourceClass, readFormNumber(formField));
+                    const form = readFormNumber(className);
+                    const grade = normalizeText(readCSVField(row, ['GRED', 'GRADE']));
+                    const markValue = normalizeText(readCSVField(row, ['MARKAH', 'SKOR', 'MARK']));
+                    const mark = ['TH', 'TD'].includes(grade) ? grade : markValue;
+                    if (![name, sourceClass, sourceAssessment, sourceSubject, sheetStudentId, formField, grade, markValue].some(Boolean)) continue;
+                    if (!name || !sourceClass || !sourceAssessment || !sourceSubject || !form ||
+                        (!['TH', 'TD'].includes(mark) && (!/^\d+(?:\.\d+)?$/.test(mark) || Number(mark) > 100))) {
+                        skippedRecords++;
+                        continue;
+                    }
 
-                        const nama = keyNama ? String(row[keyNama] || '').trim() : '';
-                        const kelas = keyKelas ? String(row[keyKelas] || '').trim() : '';
-                        const pentaksiran = keyPentaksiran ? String(row[keyPentaksiran] || '').trim() : '';
-                        const subjek = keySubjek ? String(row[keySubjek] || '').trim() : '';
-                        const markah = keyMarkah ? String(row[keyMarkah] || '').trim().toUpperCase() : '';
+                    const studentKey = JSON.stringify([normalizeText(name), className]);
+                    const candidates = studentsByClassAndName.get(studentKey) || [];
+                    const idMatches = sheetStudentId ? candidates.filter(student => student.sheetStudentId === sheetStudentId) : [];
+                    const eligible = idMatches.length ? idMatches
+                        : candidates.filter(student => !sheetStudentId || !student.sheetStudentId);
+                    if (eligible.length > 1) {
+                        skippedRecords++;
+                        continue;
+                    }
+                    let student = eligible[0];
+                    if (!student) {
+                        student = { id: nextStudentId++, name, class: className, form, sheetStudentId };
+                        MOCK_DB.students.push(student);
+                        studentsByClassAndName.set(studentKey, [...candidates, student]);
+                    } else if (!student.sheetStudentId && sheetStudentId) {
+                        student.sheetStudentId = sheetStudentId;
+                    }
 
-                        if(nama !== '' && subjek !== '' && markah !== '') {
-                            const candidates = MOCK_DB.students.filter(s => normalizeText(s.name) === normalizeText(nama) && normalizeText(s.class) === normalizeText(kelas));
-                            const student = candidates.length === 1 ? candidates[0] : null;
+                    const assessmentKey = normalizeText(sourceAssessment);
+                    const subjectKey = normalizeText(sourceSubject);
+                    if (!assessmentsByKey.has(assessmentKey)) assessmentsByKey.set(assessmentKey, sourceAssessment);
+                    if (!subjectsByKey.has(subjectKey)) subjectsByKey.set(subjectKey, sourceSubject);
+                    const assessment = assessmentsByKey.get(assessmentKey);
+                    const subject = subjectsByKey.get(subjectKey);
+                    const recordKey = JSON.stringify([student.id, assessment, subject]);
+                    const timestamp = Date.parse(readCSVField(row, ['TIMESTAMP', 'CAP MASA']));
+                    const previous = marksByStudentSubject.get(recordKey);
+                    if (Number.isFinite(previous?.timestamp) && Number.isFinite(timestamp) && timestamp < previous.timestamp) continue;
 
-                            if(student) {
-                                MOCK_DB.marks.push({
-                                    studentId: student.id,
-                                    assessment: pentaksiran,
-                                    subject: subjek,
-                                    mark: markah,
-                                    teacherComment: readCSVField(row, ['ULASAN GURU KELAS'])
-                                });
-                            }
-                        }
+                    marksByStudentSubject.set(recordKey, {
+                        studentId: student.id, assessment, subject, mark, timestamp,
+                        sheetStudentId, sourceClass, sourceAssessment, sourceSubject, sourceName: name,
+                        teacherComment: readCSVField(row, ['ULASAN GURU KELAS'])
                     });
                 }
+
+                MOCK_DB.marks = Array.from(marksByStudentSubject.values());
+                MOCK_DB.classes = [...new Set(MOCK_DB.students.map(student => student.class))].sort(naturalSort);
+                MOCK_DB.assessments = Array.from(assessmentsByKey.values());
+                MOCK_DB.subjects = Array.from(subjectsByKey.values()).sort(naturalSort);
+                if (skippedRecords) dataWarnings.push(skippedRecords + ' rekod markah tidak dapat dipadankan atau mempunyai data tidak lengkap.');
+                if (!MOCK_DB.marks.length && csvMarkah) dataWarnings.push('Tiada rekod markah yang boleh dianalisis dalam CSV.');
 
                 if (!MOCK_DB.students.length) throw new Error('CSV murid perlu mempunyai kolum KELAS dan NAMA MURID yang lengkap.');
                 if (!MOCK_DB.assessments.length || !MOCK_DB.subjects.length) throw new Error('CSV pentaksiran dan subjek perlu mempunyai kolum PENTAKSIRAN dan SUBJEK.');
@@ -1290,8 +1330,23 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
             return result;
         }
 
+        function readFormNumber(value) {
+            const text = normalizeText(value).replace(/^TINGKATAN\s+/, '');
+            const numeric = text.match(/^([1-6])(?!\d)/);
+            if (numeric) return Number(numeric[1]);
+            return Math.max(0, ['', 'SATU', 'DUA', 'TIGA', 'EMPAT', 'LIMA', 'ENAM'].indexOf(text));
+        }
+
+        function normalizeClassName(value, form) {
+            const text = normalizeText(value).replace(/^TINGKATAN\s+(?=[1-6])/, '');
+            if (!text) return '';
+            const prefix = text.match(/^([1-6])(?!\d)[\s.-]*(.*)$/);
+            if (prefix) return [prefix[1], prefix[2]].filter(Boolean).join(' ');
+            return form ? form + ' ' + text : text;
+        }
+
         function getFormByClassName(className) {
-            return parseInt(className.charAt(0));
+            return MOCK_DB.students.find(student => student.class === className)?.form || readFormNumber(className);
         }
 
         // Logic berdasarkan arahan prompt
@@ -1408,10 +1463,21 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
             }
 
             // Pilihan Aliran
+            const forms = [...new Set([1, 2, 3, 4, 5, ...MOCK_DB.students.map(student => student.form)])].sort();
             ['km-aliran', 'amp-aliran'].forEach(id => {
-                const select = document.getElementById(id); select.innerHTML = '';
-                [1,2,3,4,5].forEach(f => select.add(new Option(`Tingkatan ${f}`, f)));
+                const select = document.getElementById(id);
+                select.innerHTML = '';
+                forms.forEach(form => select.add(new Option(`Tingkatan ${form}`, form)));
             });
+
+            const firstMark = MOCK_DB.marks.find(record => record.mark !== 'TD') || MOCK_DB.marks[0];
+            const firstStudent = MOCK_DB.students.find(student => student.id === firstMark?.studentId);
+            if (isTeacher() && firstStudent) {
+                ['ai-kelas', 'slip-kelas'].forEach(id => document.getElementById(id).value = firstStudent.class);
+                ['ai-pentaksiran', 'amp-pentaksiran', 'km-pentaksiran', 'slip-pentaksiran']
+                    .forEach(id => document.getElementById(id).value = firstMark.assessment);
+                ['km-aliran', 'amp-aliran'].forEach(id => document.getElementById(id).value = String(firstStudent.form));
+            }
         }
 
         function loadInputTable() {
@@ -1435,7 +1501,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
                 html += `
                     <tr class="hover:bg-slate-50 transition-colors" data-studentid="${stu.id}">
                         <td class="px-4 py-3 text-center border-r border-slate-100">${index + 1}</td>
-                        <td class="px-4 py-3 font-medium text-slate-800">${stu.name}</td>
+                        <td class="px-4 py-3 font-medium text-slate-800">${escapeHTML(stu.name)}</td>
                         <td class="px-4 py-3">
                             <div class="flex gap-2">
                                 <button onclick="setQuickMark(${stu.id}, 'TH')" class="px-3 py-1 bg-red-100 text-red-700 hover:bg-red-200 rounded text-xs font-semibold">TH</button>
@@ -1508,6 +1574,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
                 const gred = document.getElementById(`gred-${stuId}`).innerText;
                 const tafsiran = document.getElementById(`tafsir-${stuId}`).innerText;
                 
+                const previous = MOCK_DB.marks.find(m => m.studentId === stuId && m.assessment === selPen && m.subject === selSub);
+                const student = MOCK_DB.students.find(s => s.id === stuId);
                 // Remove existing from local MOCK_DB so it updates instantly
                 MOCK_DB.marks = MOCK_DB.marks.filter(m => !(m.studentId === stuId && m.assessment === selPen && m.subject === selSub));
                 
@@ -1518,6 +1586,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
                 }
                 
                 MOCK_DB.marks.push({
+                    ...previous,
                     studentId: stuId,
                     assessment: selPen,
                     subject: selSub,
@@ -1526,12 +1595,12 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 
                 // Kumpul data untuk dihantar secara pukal ke Google Sheets
                 dataToSave.push({
-                    studentId: stuId,
-                    name: studentName,
-                    kelas: selKelas,
+                    studentId: previous?.sheetStudentId || student?.sheetStudentId || stuId,
+                    name: previous?.sourceName || studentName,
+                    kelas: previous?.sourceClass || selKelas,
                     form: form,
-                    pentaksiran: selPen,
-                    subjek: selSub,
+                    pentaksiran: previous?.sourceAssessment || selPen,
+                    subjek: previous?.sourceSubject || selSub,
                     mark: finalMark,
                     gred: gred,
                     tafsiran: tafsiran
@@ -1592,7 +1661,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 
             students.forEach(stu => {
                 studentDataMap.set(stu.id, { 
-                    id: stu.id, name: stu.name, subjects: {}, totalMark: 0, 
+                    id: stu.id, name: stu.name, subjects: Object.create(null), totalMark: 0, 
                     subjCount: 0, form: form, totalGp: 0, gpSubjCount: 0 
                 });
             });
@@ -1624,7 +1693,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
             const subjectsArr = Array.from(classSubjects).sort();
 
             // Calculate Purata and Ranking
-            let studentList = Array.from(studentDataMap.values());
+            let studentList = Array.from(studentDataMap.values()).filter(student => student.subjCount > 0);
             studentList.forEach(s => {
                 s.purata = s.subjCount > 0 ? (s.totalMark / s.subjCount).toFixed(2) : 0;
                 s.gpa = s.gpSubjCount > 0 ? (s.totalGp / s.gpSubjCount).toFixed(2) : '0.00';
@@ -1640,7 +1709,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
                 <th rowspan="2" class="px-4 py-2 border border-slate-200 bg-slate-100 align-middle min-w-[200px]">NAMA MURID</th>`;
             
             subjectsArr.forEach(sub => {
-                theadHtml += `<th colspan="2" class="px-2 py-1 border border-slate-200 text-center bg-blue-50 truncate max-w-[150px]" title="${sub}">${sub.substring(0, 10)}.</th>`;
+                theadHtml += `<th colspan="2" class="px-2 py-1 border border-slate-200 text-center bg-blue-50 truncate max-w-[150px]" title="${escapeHTML(sub)}">${escapeHTML(sub.substring(0, 10))}.</th>`;
             });
             
             theadHtml += `
@@ -1659,7 +1728,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
             studentList.forEach((s, idx) => {
                 tbodyHtml += `<tr class="hover:bg-blue-50">
                     <td class="px-3 py-2 border border-slate-200 text-center font-bold">${idx + 1}</td>
-                    <td class="px-4 py-2 border border-slate-200 text-xs font-medium truncate max-w-[200px]" title="${s.name}">${s.name}</td>`;
+                    <td class="px-4 py-2 border border-slate-200 text-xs font-medium truncate max-w-[200px]" title="${escapeHTML(s.name)}">${escapeHTML(s.name)}</td>`;
                 
                 subjectsArr.forEach(sub => {
                     let mData = s.subjects[sub];
@@ -1678,7 +1747,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
                     <td class="px-2 py-2 border border-slate-200 text-center font-semibold text-emerald-600">${s.gredPurata}</td>
                 </tr>`;
             });
-            document.getElementById('ai-ranking-tbody').innerHTML = tbodyHtml;
+            document.getElementById('ai-ranking-tbody').innerHTML = tbodyHtml ||
+                `<tr><td colspan="${5 + subjectsArr.length * 2}" class="p-4 text-center text-slate-500">Tiada rekod markah untuk pilihan ini.</td></tr>`;
 
             // 2. Build Murid Terbaik Subjek
             let terbaikHtml = '';
@@ -1703,8 +1773,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
                     terbaikHtml += `
                         <tr class="hover:bg-slate-50">
                             <td class="px-4 py-2 text-center border-b border-slate-100">${bIl++}</td>
-                            <td class="px-4 py-2 font-semibold text-slate-700 border-b border-slate-100">${sub}</td>
-                            <td class="px-4 py-2 text-blue-700 border-b border-slate-100">${bestStudent.name}</td>
+                            <td class="px-4 py-2 font-semibold text-slate-700 border-b border-slate-100">${escapeHTML(sub)}</td>
+                            <td class="px-4 py-2 text-blue-700 border-b border-slate-100">${escapeHTML(bestStudent.name)}</td>
                             <td class="px-4 py-2 text-center font-bold border-b border-slate-100">${highestMark}</td>
                             <td class="px-4 py-2 text-center font-bold border-b border-slate-100">${evalD.gred}</td>
                             <td class="px-4 py-2 text-sm text-slate-500 border-b border-slate-100">${evalD.tafsiran}</td>
@@ -1734,7 +1804,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
             const gradesList = isUpper ? ['A+', 'A', 'A-', 'B+', 'B', 'C+', 'C', 'D', 'E', 'G'] : ['A', 'B', 'C', 'D', 'E', 'F'];
 
             // Aggregate data by subject
-            let subjectStats = {};
+            let subjectStats = Object.create(null);
 
             marks.forEach(m => {
                 if(m.mark === 'TD' || m.mark === '') return; // Tidak daftar tak kira
@@ -1832,7 +1902,7 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
 
                 tBodyHtml += `<tr>
                     <td class="px-2 py-1 border border-slate-300 text-center">${idx + 1}</td>
-                    <td class="px-2 py-1 border border-slate-300 font-medium">${s.name}</td>
+                    <td class="px-2 py-1 border border-slate-300 font-medium">${escapeHTML(s.name)}</td>
                     <td class="px-2 py-1 border border-slate-300 text-center bg-slate-50">${s.daftar}</td>
                     <td class="px-2 py-1 border border-slate-300 text-center font-semibold text-blue-700">${s.ambil}</td>
                     <td class="px-2 py-1 border border-slate-300 text-center text-red-500">${s.th}</td>`;
@@ -1937,8 +2007,8 @@ function(t){t.__bidiEngine__=t.prototype.__bidiEngine__=function(t){var r,n,i,a,
                 html += `
                     <tr class="hover:bg-slate-50 border-b border-slate-100">
                         <td class="px-4 py-3 text-center font-bold text-slate-700">${idx + 1}</td>
-                        <td class="px-4 py-3 font-medium text-slate-800">${r.name}</td>
-                        <td class="px-4 py-3 text-slate-600">${r.cls}</td>
+                        <td class="px-4 py-3 font-medium text-slate-800">${escapeHTML(r.name)}</td>
+                        <td class="px-4 py-3 text-slate-600">${escapeHTML(r.cls)}</td>
                         <td class="px-4 py-3 text-center font-semibold text-blue-700">${r.jm}</td>
                         <td class="px-4 py-3 text-center font-bold">${r.purata}</td>
                         <td class="px-4 py-3 text-center font-semibold">${r.gp}</td>
